@@ -1,0 +1,99 @@
+#include <iostream>
+#include <fstream>
+#include <stdlib.h>
+#include <math.h>
+#include <numeric>
+#include <time.h>
+#include <unistd.h>
+#include <algorithm>    // std::generate
+#include <vector>       // std::vector
+#include <cstdlib>      // std::rand, std::srand
+#include "safecalls.cu"
+#include <assert.h> 
+
+#include <cuda.h>
+#include <cufft.h>
+#include <cuda_runtime.h>
+#include <helper_math.h>
+
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/ini_parser.hpp>
+
+#define MAXT 512 
+
+//Device Pointer
+struct dPointer {
+	float  *phiOld, *test;
+	float2 *FftIn, *FftOut;
+	float2 *FftIn_w, *FftOut_w;
+	float2 *CellsIn, *CellsOut;
+	float2 *RDIn, *RDOut;
+	float2 *Pos, *ComPos;
+	float4 *Sum;
+	float *SpecMethDiffBend, *RhoTot;
+	float4 *SpectralGradLap;
+};
+
+//For parameters that are needed on the Host AND the Device
+struct ParD {
+	int N, N2; //number of points and N2 = N * N
+	float L;
+	float dt;
+	float dx, dx2; //dx=L/N, dx2=dx*dx
+	float DeltaX;
+	float alpha, beta, gamma, kappa, epsilon2;
+	float k_a, k_b, k_c, KK_a, k_Ib, eta, rhotot; //Rho 
+	float2 DiffRD ;
+	int CN; //CellNumber
+	int NumSave;//How often we save
+};
+
+struct ParHost {
+	float dk;
+	int  EndSteps, SaveSteps;
+	float SaveTime, EndTime;
+	int NumberCellFields; //sizes of the fields we use
+	size_t method;
+	long seed;
+	float R;
+	float gamma, kappa, epsilon, tao;
+	dim3 blocks, threads, blocks1D, threads1D;
+	std::string path;
+	bool PlotStates;
+};
+
+//returns random number between -1 and 1
+double rn(){
+	return 2.*(drand48()-0.5);
+}
+
+// class generator:
+struct c_unique {
+	  int current;
+	  c_unique() {current=0;}
+	  int operator()() {return ++current;}
+} UniqueNumber;
+
+void swap(float2* &a, float2* &b){
+  float2 *temp = a;
+  a = b;
+  b = temp;
+}
+
+void Assert(ParD* par, ParHost* parHost);
+void ChooseGPU();
+float ComputeDistance(int size, int x1, int x2, int y1, int y2);
+int ComputeDistanceDimension(int Point1, int Point2, int Boundary, int size);
+void CudaDeviceMem(ParD* par, ParHost* parHost, dPointer * d_point);
+void CudaDeviceMemFree(dPointer * d_point);
+void InitialConditions(ParD* par, ParHost* parHost, dPointer * d_point);
+void InitializeStartDirection(ParD* par, ParHost* parHost, dPointer * d_point, float* AngleVec, float2* Position);
+void PlotRandomField(ParD* par, ParHost* parHost, dPointer *d_point, int run);
+void PlotStates(ParD* par, ParHost* parHost, dPointer *d_point, int run);
+void Prepare(ParD* par, ParHost* parHost);
+void PrepareGPU(ParD* par, ParHost* parHost);
+void ReadParamFromFile(ParD* par, ParHost* parHost);
+void Scaling(ParD* par, ParHost* parHost);
+void SetUpPosM(dPointer *d_point, ParD* par, ParHost* parHost);
+void SetUpSpecM(dPointer *d_point, ParD* par, ParHost* parHost);
+void WritePosition(ParD* par, ParHost* parHost, dPointer * d_point);
