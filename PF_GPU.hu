@@ -25,7 +25,6 @@
 struct dPointer {
 	float  *phiOld, *test;
 	float2 *FftIn, *FftOut;
-	float2 *FftIn_w, *FftOut_w;
 	float2 *CellsIn, *CellsOut;
 	float2 *RDIn, *RDOut;
 	float2 *Pos, *ComPos;

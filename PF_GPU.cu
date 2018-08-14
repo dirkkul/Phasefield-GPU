@@ -2,8 +2,6 @@
 
 __device__ __constant__ ParD d_par; //Parameterstruct on GPU
 
-texture<float2,2,cudaReadModeElementType> tex_SM_DiffBend;
-
 __global__ void d_DiffusionFFT(dPointer d_point){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
@@ -51,10 +49,10 @@ __global__ void d_PhiGDeriv(dPointer d_point){
 		float4 const coeff = d_point.SpectralGradLap[offset];
 		
 		for(int Cell = 0; Cell < d_par.CN;  Cell+= 2){
-			d_point.FftOut[offset + 4 * Cell/2 * d_par.N2] 		= d_point.FftIn_w[offset + Cell 		* d_par.N2] * coeff.x;
-			d_point.FftOut[offset + (4 * Cell/2 + 1) * d_par.N2]	= d_point.FftIn_w[offset + (Cell + 1) * d_par.N2] * coeff.x;
+			d_point.FftOut[offset + 4 * Cell/2 * d_par.N2] 		= d_point.FftIn[offset + Cell 		* d_par.N2] * coeff.x;
+			d_point.FftOut[offset + (4 * Cell/2 + 1) * d_par.N2]	= d_point.FftIn[offset + (Cell + 1) * d_par.N2] * coeff.x;
 			
-			float2 InVar = d_point.FftIn_w[offset + Cell	* d_par.N2];
+			float2 InVar = d_point.FftIn[offset + Cell	* d_par.N2];
 			float2 OutGradX, OutGradY;
 			OutGradX.y	= InVar.x * coeff.z;
 			OutGradY.y	= InVar.x * coeff.w;
@@ -79,19 +77,19 @@ __global__ void d_PhiExpl(dPointer d_point){
 			float const Rho = d_point.RDIn[offset+CellIdx*d_par.N2].x;
 			if(CellIdx%2 == 0){
 					Phi = d_point.CellsIn[offset + d_par.N2 * CellIdx].x ;
-					laplace = d_point.FftOut_w[offset + 4*CellIdx/2 	* d_par.N2].x;
-					PotGrad = d_point.FftOut_w[offset + (4*CellIdx/2+1) * d_par.N2].x;
+					laplace = d_point.FftOut[offset + 4*CellIdx/2 	* d_par.N2].x;
+					PotGrad = d_point.FftOut[offset + (4*CellIdx/2+1) * d_par.N2].x;
 
-					DivX = d_point.FftOut_w[offset + (4*CellIdx/2+2) * d_par.N2].x; 
-					DivY = d_point.FftOut_w[offset + (4*CellIdx/2+3) * d_par.N2].x;
+					DivX = d_point.FftOut[offset + (4*CellIdx/2+2) * d_par.N2].x; 
+					DivY = d_point.FftOut[offset + (4*CellIdx/2+3) * d_par.N2].x;
 			}else{
 					int const CellField = (CellIdx - 1)/2;
 					Phi = d_point.CellsIn[offset + d_par.N2 * CellField].y;
-					laplace = d_point.FftOut_w[offset + 4*CellField/2 	* d_par.N2].y;
-					PotGrad = d_point.FftOut_w[offset + (4*CellField/2+1) * d_par.N2].y;
+					laplace = d_point.FftOut[offset + 4*CellField/2 	* d_par.N2].y;
+					PotGrad = d_point.FftOut[offset + (4*CellField/2+1) * d_par.N2].y;
 					
-					DivX = d_point.FftOut_w[offset + (4*CellField+2) * d_par.N2].y;
-					DivY = d_point.FftOut_w[offset + (4*CellField+3) * d_par.N2].y;
+					DivX = d_point.FftOut[offset + (4*CellField+2) * d_par.N2].y;
+					DivY = d_point.FftOut[offset + (4*CellField+3) * d_par.N2].y;
 			}
 			float gradAbs = DivX * DivX + DivY * DivY;
 			
@@ -336,51 +334,25 @@ int main(int argc, char** argv){
 	
 	InitialConditions(&par, &parHost, &d_point);
 	CudaSafeCall( cudaMemcpyToSymbol(d_par, &par, sizeof(ParD)) );
-
-	//~ d_SumCont <<<parHost.blocks, parHost.threads>>>(d_point);
-	//~ CudaCheckError();
-	
-	//~ PlotStates(&par, &parHost, &d_point, 0);
-	
-	//~ d_SumRho<<<parHost.blocks1D, parHost.threads1D>>>(d_point);
-	//~ CudaCheckError();
-	//~ d_UpdateRD <<<parHost.blocks, parHost.threads>>>(d_point);
-	//~ CudaCheckError();
-	//~ PlotRandomField(&par, &parHost, &d_point, 0);
-
 	
 	for(size_t t=0; t<parHost.EndSteps+1; t++){
-		
-		
 		d_SumRho<<<parHost.blocks1D, parHost.threads1D>>>(d_point);
 		CudaCheckError();
 		
-		//~ float *RhoTot  = new float[par.CN];
-		//~ CudaSafeCall( cudaMemcpy(RhoTot , d_point.RhoTot, par.CN* sizeof(float), cudaMemcpyDeviceToHost) );
-		//~ std::cout <<RhoTot[0]<< " "<<RhoTot[1] << std::endl;
-		//~ delete[] RhoTot;
-
 		d_PreparePhiGDeriv<<<parHost.blocks, parHost.threads>>>(d_point);
 		CudaCheckError();
 		
-		cufftExecC2C(BatchFFT_DerivFor,(cufftComplex*) d_point.FftIn,(cufftComplex*) d_point.FftIn_w,CUFFT_FORWARD);
+		cufftExecC2C(BatchFFT_DerivFor,(cufftComplex*) d_point.FftIn,(cufftComplex*) d_point.FftIn,CUFFT_FORWARD);
 		CudaCheckError();
 		
 		d_PhiGDeriv<<<parHost.blocks, parHost.threads>>>(d_point);
 		CudaCheckError();
 		
-		cufftExecC2C(BatchFFT_DerivBack,(cufftComplex*) d_point.FftOut,(cufftComplex*) d_point.FftOut_w,CUFFT_INVERSE);
+		cufftExecC2C(BatchFFT_DerivBack,(cufftComplex*) d_point.FftOut,(cufftComplex*) d_point.FftOut,CUFFT_INVERSE);
 		CudaCheckError();
-		
-		//~ float2 *FftOut_w  = new float2[par.N2*4*parHost.NumberCellFields];
-		//~ CudaSafeCall( cudaMemcpy(FftOut_w , d_point.FftOut_w, par.N2 *parHost.NumberCellFields*4* sizeof(float2), cudaMemcpyDeviceToHost) );
-		//~ std::cout <<FftOut_w[0].x << std::endl;
-		//~ exit(1);
 		
 		d_PhiExpl<<<parHost.blocks, parHost.threads>>>(d_point);
 		CudaCheckError();
-		
-		
 		
 		d_FFT_TimeStep(d_point, BatchFFT_TimeStep);
 		CudaCheckError();
@@ -415,6 +387,7 @@ int main(int argc, char** argv){
 	CudaDeviceMemFree(&d_point);
 	
 	cufftDestroy(BatchFFT_DerivFor);
+	cufftDestroy(BatchFFT_DerivBack);
 	cufftDestroy(BatchFFT_TimeStep);
 }
 
@@ -507,16 +480,7 @@ void CudaDeviceMem(ParD* par, ParHost* parHost, dPointer * d_point ){
 	CudaSafeCall(cudaMalloc(&(d_point->test)				, par->CN  * par->N2* sizeof(float)) );
 	
 	CudaSafeCall(cudaMalloc(&(d_point->FftIn)				, parHost->NumberCellFields * par->N2 * 2* sizeof(float2)));
-	CudaSafeCall(cudaMalloc(&(d_point->FftIn_w)				, parHost->NumberCellFields * par->N2 * 2* sizeof(float2)));
 	CudaSafeCall(cudaMalloc(&(d_point->FftOut)				, parHost->NumberCellFields * par->N2 * 4* sizeof(float2)));
-	CudaSafeCall(cudaMalloc(&(d_point->FftOut_w)			, parHost->NumberCellFields * par->N2 * 4* sizeof(float2)));
-	
-	//~ CudaSafeCall( cudaMemset(d_point->CellsOut, 0, parHost->NumberCellFields * par->N2 * sizeof(float2)) );
-	//~ CudaSafeCall( cudaMemset(d_point->FftOut, 0, parHost->NumberCellFields * 4 *par->N2 * sizeof(float2)) );
-	
-	//~ cudaChannelFormatDesc descREAL2 = cudaCreateChannelDesc<float2>();
-	//~ CudaSafeCall( cudaBindTexture2D( NULL, tex_SM_DiffBend , d_point->SpecMethDiffBend, descREAL2, par->N, par->N, par->N * sizeof(float2) ) );
-
 }
 
 void CudaDeviceMemFree(dPointer * d_point ){
