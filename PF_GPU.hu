@@ -41,7 +41,7 @@ struct ParD {
 	float dt;
 	float dx, dx2; //dx=L/N, dx2=dx*dx
 	float DeltaX;
-	float alpha, beta, gamma, kappa, epsilon2;
+	float alpha, beta, gamma, kappa, epsilon2, grep, sigma;
 	float k_a, k_b, k_c, KK_a, k_Ib, eta, rhotot; //Rho 
 	float2 DiffRD ;
 	int CN; //CellNumber
@@ -59,7 +59,7 @@ struct ParHost {
 	float gamma, kappa, epsilon, tao;
 	dim3 blocks, threads, blocks1D, threads1D;
 	std::string path;
-	bool PlotStates;
+	bool PlotStates, StartAngleFromFile, StartPosFromFile;
 };
 
 //returns random number between -1 and 1

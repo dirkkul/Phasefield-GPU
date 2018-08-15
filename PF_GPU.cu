@@ -5,9 +5,8 @@ __device__ __constant__ ParD d_par; //Parameterstruct on GPU
 __global__ void d_SeedNoise(curandState *state, int seed, int n){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
-	
 	int const offset = x + y * d_par.N;
-
+	
 	if(offset < d_par.N2){
 		for(int CellIdx = 0; CellIdx < d_par.CN;  CellIdx++){
 			curand_init(seed, offset, 0, &state[offset+CellIdx*d_par.N2]);
@@ -19,7 +18,6 @@ __global__ void d_SeedNoise(curandState *state, int seed, int n){
 __global__ void d_DiffusionFFT(dPointer d_point){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
-	
 	int const offset = x + y * d_par.N;
 	
 	if(offset < d_par.N2){
@@ -34,6 +32,7 @@ __global__ void d_PreparePhiGDeriv(dPointer d_point){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
 	int const offset = x + y * d_par.N;	
+	
 	if(offset < d_par.N2){
 		float Phi;
 		for(int CellIdx = 0; CellIdx < d_par.CN;  CellIdx++){
@@ -83,7 +82,32 @@ __global__ void d_PhiExpl(dPointer d_point){
 	
 	int const offset = x + y * d_par.N;
 	if(offset < d_par.N2){
+		
+		float PhiSum = 0, AbsGradSum = 0;
 		float DivX, DivY, laplace, PotGrad, Phi;
+		
+		DivX = d_point.FftOut[offset+2*d_par.N2].x;
+		DivY = d_point.FftOut[offset+3*d_par.N2].x;
+		float absgrad1 = sqrt(DivX*DivX + DivY*DivY);
+		
+		DivX = d_point.FftOut[offset+2*d_par.N2].y;
+		DivY = d_point.FftOut[offset+3*d_par.N2].y;
+		float absgrad2 = sqrt(DivX*DivX + DivY*DivY);
+		
+		for(int CellIdx = 0; CellIdx < d_par.CN; CellIdx++){
+			if(CellIdx%2 == 0){
+					Phi = d_point.CellsIn[offset + d_par.N2 * CellIdx].x;
+					DivX = d_point.FftOut[offset + (4*CellIdx/2+2) * d_par.N2].x; 
+					DivY = d_point.FftOut[offset + (4*CellIdx/2+3) * d_par.N2].x;
+				}else{
+					int const CellField = (CellIdx - 1)/2;
+					Phi = d_point.CellsIn[offset + d_par.N2 * CellField].y;
+					DivX = d_point.FftOut[offset + (4*CellField+2) * d_par.N2].y;
+					DivY = d_point.FftOut[offset + (4*CellField+3) * d_par.N2].y;
+				}
+			PhiSum += Phi;
+			AbsGradSum += DivX*DivX + DivY*DivY;
+		}
 		
 		for(int CellIdx = 0; CellIdx < d_par.CN; CellIdx++){
 			float const Rho = d_point.RDIn[offset+CellIdx*d_par.N2].x;
@@ -112,15 +136,15 @@ __global__ void d_PhiExpl(dPointer d_point){
 			float const PhiUpdate = Phi
 			+ d_par.kappa * (PotGrad + GDiff.y*(laplace-GDiff.x/d_par.epsilon2))
 			- d_par.gamma * GDiff.x
-			+ (d_par.alpha*Rho - d_par.beta) * sqrt(gradAbs);
+			+ (d_par.alpha*Rho - d_par.beta) * sqrt(gradAbs)
+			- d_par.grep * (PhiSum - Phi)*Phi
+			+ d_par.sigma * (AbsGradSum - gradAbs)*gradAbs;
 			
 			if(CellIdx%2 == 0){
 				d_point.CellsOut[offset + d_par.N2 * CellIdx/2].x = PhiUpdate;
 			}else{
 				d_point.CellsOut[offset + d_par.N2 * (CellIdx - 1)/2].y = PhiUpdate;
 			}
-			//~ - par->grep * (repul[indBig].x - Phi)
-			//~ - par->sigma * AdhGrad;
 		}
 	}
 }
@@ -181,8 +205,6 @@ __global__ void d_UpdateRD(dPointer d_point, curandState *state, bool disN){
 				RDdiv.x = ReakDiff.x;
 				RDdiv.y = ReakDiff.y + noise * Phi;
 			}
-			
-			d_point.test[offset + CellInd] = -d_par.k_Ib*RD.y;
 			d_point.RDOut[offset + CellInd] = RDdiv;
 		}
 	}
@@ -615,51 +637,105 @@ void InitialConditions(ParD* par, ParHost* parHost, dPointer * d_point){
  * \param par: Struct in which we store all values. This struct will be copied to the constant device Memory later
  * \param ParHost: Parameters we only need on the host
  * \param d_point: Struct with device Pointers 
- * \param AngleVec: Initial cell direction
+ * \param Direction: Initial cell direction
  * \param Position: Initial cell position
  */
-void InitializeStartDirection(ParD* par, ParHost* parHost, dPointer * d_point, float* AngleVec, float2* Position){
-	//Calculate the maximal number of starting positions 
-	//distance between the middle of two Cells should be two times the radius + some extra space. We also need to know how many Cells can fit in one line.
-	int dist = 2 * parHost->R/par->dx + 15;
-	int oneLine = max(par->N/ dist, 1);
+void InitializeStartDirection(ParD* par, ParHost* parHost, dPointer * d_point, float* Direction, float2* Position){
 	
-	int NumberCellPositions = oneLine * oneLine;
-	
-	//exit if there are more Cells than startpositions
-	if(par->CN>NumberCellPositions){
-		std::cout << "More Cells than possible Startpositions, exiting"<<std::endl;
-		exit(1);
+	if(parHost->StartPosFromFile){ //read start positions from file
+		std::ifstream StartDirfile ("CellPosStartData.dat");
+		if(StartDirfile.is_open()){
+			float PosX, PosY;
+			size_t Cell=0;
+			
+			while(StartDirfile >> PosX >> PosY && Cell < par->CN){
+				Position[Cell].x = (int)(PosX / par->dx);
+				Position[Cell].y = (int)(PosY / par->dx);
+				
+				Cell++;
+				if(PosX <=0 || PosY <= 0 || PosX >=  par->N || PosY>= par->N){
+					std::cout << "Starting values can't be <=0 or >=N. Exiting."<<std::endl;
+					exit(1);
+				}
+			}
+			
+			if(Cell< par->CN){
+				std::cout << "Not enough Starting Values in CellPosStartData.dat. Exiting" << std::endl;
+				exit(1);
+			}
+		}else{
+			std::cout << "coudn't find CellPosStartData.dat. Exiting"<<std::endl;
+			exit(1);
+		}
+		StartDirfile.close();
+	}else{
+		//generate some startpositions
+		
+		//Calculate the maximal number of starting positions 
+		//distance between the middle of two Cells should be two times the radius + some extra space. We also need to know how many Cells can fit in one line.
+		int dist = 2 * parHost->R/par->dx + 15;
+		int oneLine = max(par->N/ dist, 1);
+		
+		int NumberCellPositions = oneLine * oneLine;
+		
+		//exit if there are more Cells than possible startpositions
+		if(par->CN>NumberCellPositions){
+			std::cout << "More Cells than possible Startpositions, exiting"<<std::endl;
+			exit(1);
+		}
+		
+		//create all possible start positions
+		std::vector <int2> PossibleStartPositions(NumberCellPositions);
+		for(int i = 0; i < NumberCellPositions; i++){
+			PossibleStartPositions[i].x = (i % oneLine) * 2* dist + parHost->R/par->dx * 1.5;
+			PossibleStartPositions[i].y = (i / oneLine) * 2 *dist + parHost->R/par->dx * 1.5;
+		}
+		
+		//create a random list from 0 to cellnumber. Shuffle the list so cells picks randomly one of the Positions
+		std::vector<int> StartList(NumberCellPositions);
+		generate (StartList.begin(), StartList.end(), UniqueNumber);
+		std::random_shuffle( StartList.begin(), StartList.end() );
+		
+		
+		//choose from all possible positions
+		std::vector <int2> StartPositions(par->CN);
+		for(int CellIdx = 0; CellIdx < par->CN; CellIdx++){
+			Position[CellIdx].x = fmod(PossibleStartPositions[StartList[CellIdx]].x + parHost->R/par->dx * rn() + par->N,par->N);
+			Position[CellIdx].y = fmod(PossibleStartPositions[StartList[CellIdx]].y + parHost->R/par->dx * rn() + par->N,par->N);
+		}
 	}
 	
-	//create all possible start positions
-	std::vector <int2> PossibleStartPositions(NumberCellPositions);
-	for(int i = 0; i < NumberCellPositions; i++){
-		PossibleStartPositions[i].x = (i % oneLine) * 2* dist + parHost->R/par->dx * 1.5;
-		PossibleStartPositions[i].y = (i / oneLine) * 2 *dist + parHost->R/par->dx * 1.5;
-	}
-	
-	//create a random list from 0 to cellnumber. Shuffle the list so cells picks randomly one of the Positions
-	std::vector<int> StartList(NumberCellPositions);
-	generate (StartList.begin(), StartList.end(), UniqueNumber);
-	std::random_shuffle( StartList.begin(), StartList.end() );
-	
-	
-	//choose from all possible positions
-	std::vector <int2> StartPositions(par->CN);
-	for(int CellIdx = 0; CellIdx < par->CN; CellIdx++){
-		Position[CellIdx].x = fmod(PossibleStartPositions[StartList[CellIdx]].x + parHost->R/par->dx * rn() + par->N,par->N);
-		Position[CellIdx].y = fmod(PossibleStartPositions[StartList[CellIdx]].y + parHost->R/par->dx * rn() + par->N,par->N);
-	}
-	
-	//random start Directions
-	for(int CellIdx = 0; CellIdx < par->CN; CellIdx++){
-		AngleVec[CellIdx] = 2.0*M_PI*drand48();
+	if(parHost->StartAngleFromFile){
+		std::cout << "Read custom starting Angle Values from file AngleStartData.dat" <<std::endl;
+		
+		std::ifstream Valfile ("AngleStartData.dat");
+		if(Valfile.is_open()){
+			double Val;
+			int Cell=0;
+			while(Valfile >> Val && Cell < par->CN){
+				Direction[Cell] = Val;
+				Cell++;
+			}
+			if(Cell< par->CN){
+				std::cout << "Not enough Starting Values in AngleStartData.dat. Exiting"<<std::endl;
+				exit(1);
+			}
+			
+		}else{
+			std::cout << "coudn't find AngleStartData.dat. Exiting"<<std::endl;
+			exit(1);
+		}
+		Valfile.close();
+	}else{
+		//random start Directions
+		for(int Cell = 0; Cell < par->CN; Cell++){
+			Direction[Cell] = 2.0*M_PI*drand48();
+		}
 	}
 	
 	//print Start positions
 	for(int CellIdx = 0; CellIdx < par->CN; CellIdx++){
-		std::cout << "StartPosition for Cell: "<<  CellIdx << " x: "<< Position[CellIdx].x << " physical pos:" <<Position[CellIdx].x * par->dx <<" y: " << Position[CellIdx].y<< " physical pos:" <<Position[CellIdx].y * par->dx << ". With Direction: " << AngleVec[CellIdx] << std::endl;
+		std::cout << "StartPosition for Cell: "<<  CellIdx << " x: "<< Position[CellIdx].x << " physical pos:" <<Position[CellIdx].x * par->dx <<" y: " << Position[CellIdx].y<< " physical pos:" <<Position[CellIdx].y * par->dx << ". With Direction: " << Direction[CellIdx] << std::endl;
 	}
 	
 	//write the startpositions to file
@@ -672,7 +748,7 @@ void InitializeStartDirection(ParD* par, ParHost* parHost, dPointer * d_point, f
 			StartPosFile << "[Cell"<< CellIdx <<"]" <<std::endl
 			<< "StartPositionX=" << Position[CellIdx].x 
 			<< "\nStartPositionY=" << Position[CellIdx].y 
-			<< "\nStartAngle=" << AngleVec[CellIdx] << std::endl;
+			<< "\nStartAngle=" << Direction[CellIdx] << std::endl;
 		}
 	}else{
 		std::cout << "Unable to write to StartPositions.dat file";
@@ -800,6 +876,8 @@ void ReadParamFromFile(ParD* par, ParHost* parHost){
 	par->dt = pt.get<float>("main.dt");
 	par->alpha = pt.get<float>("main.alpha");
 	par->beta = pt.get<float>("main.beta");
+	par->grep = pt.get<float>("main.grep");
+	par->sigma = pt.get<float>("main.sigma");
 	
 	par->k_a = pt.get<float>("main.k_a");
 	par->k_b = pt.get<float>("main.k_b");
@@ -821,15 +899,17 @@ void ReadParamFromFile(ParD* par, ParHost* parHost){
 	parHost->EndTime = pt.get<float>("main.EndTime");
 	parHost->SaveTime = pt.get<float>("main.SaveTime");
 	
-	parHost->PlotStates = true;
+	parHost->PlotStates = pt.get<bool>("main.PlotStates");
+	parHost->StartAngleFromFile = pt.get<bool>("main.StartAngleFromFile");
+	parHost->StartPosFromFile = pt.get<bool>("main.StartPosFromFile");
 }
 
 void Scaling(ParD* par, ParHost* parHost){
 	//phi
 	par->alpha = par->alpha * par->dt/parHost->tao;
 	par->beta  = par->beta * par->dt/parHost->tao;
-	//~ par->grep  = par->grep * par->dt/(parHost->tao * parHost->epsilon);
-	//~ par->sigma = par->sigma * par->dt * parHost->epsilon * parHost->epsilon/(parHost->tao * 12.0 * par->dx2);
+	par->grep  = par->grep * par->dt/(parHost->tao * parHost->epsilon);
+	par->sigma = par->sigma * par->dt * parHost->epsilon * parHost->epsilon/(parHost->tao * 12.0 * par->dx2);
 	par->gamma = parHost->gamma * par->dt /(parHost->epsilon * parHost->epsilon)/parHost->tao;
 	par->kappa = parHost->kappa * par->dt /(parHost->epsilon * parHost->epsilon)/parHost->tao;
 	
