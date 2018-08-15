@@ -1,0 +1,2 @@
+nvcc -ccbin clang-3.8 -g -G PF_GPU.cu -lcuda -lcufft -lcurand -lstdc++ -lm -O3 -arch sm_20 -m 64
+exit $?
