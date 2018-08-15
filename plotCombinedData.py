@@ -97,5 +97,5 @@ ax2.set_xlabel("X")
 
 plt.tight_layout()
 
-plt.savefig(os.path.join(args.inputDir,folder, 'Combined_'+CurrentStep+'.png'),bbox_inches='tight')
+plt.savefig(os.path.join(args.inputDir,folder, 'Combined_'+CurrentStep+'.png'),bbox_inches='tight', dpi=300)
 plt.close(fig)

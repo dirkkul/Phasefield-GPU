@@ -12,6 +12,7 @@
 #include <assert.h> 
 
 #include <cuda.h>
+#include <curand_kernel.h>
 #include <cufft.h>
 #include <cuda_runtime.h>
 #include <helper_math.h>
@@ -23,7 +24,7 @@
 
 //Device Pointer
 struct dPointer {
-	float  *phiOld, *test;
+	float  *phiOld, *test, *Noise;
 	float2 *FftIn, *FftOut;
 	float2 *CellsIn, *CellsOut;
 	float2 *RDIn, *RDOut;

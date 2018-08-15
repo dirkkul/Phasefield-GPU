@@ -2,6 +2,20 @@
 
 __device__ __constant__ ParD d_par; //Parameterstruct on GPU
 
+__global__ void d_SeedNoise(curandState *state, int seed, int n){
+	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
+	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
+	
+	int const offset = x + y * d_par.N;
+
+	if(offset < d_par.N2){
+		for(int CellIdx = 0; CellIdx < d_par.CN;  CellIdx++){
+			curand_init(seed, offset, 0, &state[offset+CellIdx*d_par.N2]);
+		}
+	}
+}
+
+
 __global__ void d_DiffusionFFT(dPointer d_point){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
@@ -33,9 +47,7 @@ __global__ void d_PreparePhiGDeriv(dPointer d_point){
 				d_point.FftIn[offset + (CellIdx - 1) * d_par.N2].y = Phi;
 				d_point.FftIn[offset + CellIdx*d_par.N2].y = 36.0 * Phi * (1.0 - Phi)*(1.0 - 2.0 * Phi);
 			}
-			
 			d_point.phiOld[offset + CellIdx*d_par.N2] = Phi;
-			
 		}
 	}
 }
@@ -102,10 +114,6 @@ __global__ void d_PhiExpl(dPointer d_point){
 			- d_par.gamma * GDiff.x
 			+ (d_par.alpha*Rho - d_par.beta) * sqrt(gradAbs);
 			
-			
-			//~ - d_par.gamma * GDiff.x
-			//~ + (d_par.alpha*Rho - d_par.beta);
-			
 			if(CellIdx%2 == 0){
 				d_point.CellsOut[offset + d_par.N2 * CellIdx/2].x = PhiUpdate;
 			}else{
@@ -117,7 +125,7 @@ __global__ void d_PhiExpl(dPointer d_point){
 	}
 }
 
-__global__ void d_UpdateRD(dPointer d_point){
+__global__ void d_UpdateRD(dPointer d_point, curandState *state, bool disN){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
 	
@@ -138,6 +146,7 @@ __global__ void d_UpdateRD(dPointer d_point){
 			int const CellInd = CellIdx * d_par.N2;
 			
 			float2 const RD = d_point.RDIn[offset + CellInd];
+			float const Phi = d_point.phiOld[offset + CellInd];
 			
 			float PhiNew;
 			if(CellIdx %2 == 0){
@@ -145,13 +154,10 @@ __global__ void d_UpdateRD(dPointer d_point){
 			}else{
 				PhiNew = d_point.CellsIn[offset + (CellIdx-1)/2 * d_par.N2].y;
 			}
-			float const Phi = d_point.phiOld[offset + CellInd];
 			
 			float const rho2 = RD.x*RD.x;
-			reak.x = d_par.k_b*(rho2/(d_par.KK_a + rho2)+d_par.k_a)*d_point.RhoTot[CellIdx] - d_par.k_c*(1+0.)*RD.x;
-			reak.y = - d_par.k_Ib * RD.y;
-			
-			float const normal = d_par.eta * 0.;
+			reak.x = d_par.k_b*(rho2/(d_par.KK_a + rho2)+d_par.k_a)*d_point.RhoTot[CellIdx] - d_par.k_c*(1.+RD.y)*RD.x;
+			reak.y = -d_par.k_Ib * RD.y;
 			
 			float2 const ReakDiff =  (2*Phi - PhiNew) * RD + Phi * reak + d_par.DiffRD * (
 																			  (Phi + d_point.phiOld[Right + CellInd]) * (d_point.RDIn[Right + CellInd] - RD) 
@@ -159,16 +165,24 @@ __global__ void d_UpdateRD(dPointer d_point){
 																			+ (Phi + d_point.phiOld[Front + CellInd]) * (d_point.RDIn[Front + CellInd] - RD) 
 																			- (Phi + d_point.phiOld[Back + CellInd]) * (RD - d_point.RDIn[Back + CellInd]) );
 			
+			//get uniform noise
+			curandState localState = state[offset + CellInd];
+			float noise = d_par.eta * (curand_uniform(&localState)-0.5);
+			state[offset + CellInd] = localState;
+			
+			if( disN)
+				noise = 0;
+			
+			
 			if(Phi >= 0.0001){
-				RDdiv.y = ReakDiff.y/Phi + normal;
 				RDdiv.x = ReakDiff.x/Phi;
+				RDdiv.y = ReakDiff.y/Phi + noise;
 			}else{
-				RDdiv.y = ReakDiff.y + normal * Phi;
 				RDdiv.x = ReakDiff.x;
-
+				RDdiv.y = ReakDiff.y + noise * Phi;
 			}
 			
-			d_point.test[offset + CellInd] = d_par.k_c*RD.x;
+			d_point.test[offset + CellInd] = -d_par.k_Ib*RD.y;
 			d_point.RDOut[offset + CellInd] = RDdiv;
 		}
 	}
@@ -320,6 +334,7 @@ int main(int argc, char** argv){
 	Prepare(&par, &parHost);
 	Scaling(&par, &parHost);
 	
+	
 	cufftHandle BatchFFT_TimeStep, BatchFFT_DerivFor, BatchFFT_DerivBack;
 	int n[2]={par.N,par.N};
 	cufftPlanMany(&BatchFFT_TimeStep, 2, n, NULL, 1, par.N2, NULL, 1, par.N2, CUFFT_C2C, parHost.NumberCellFields);
@@ -334,6 +349,10 @@ int main(int argc, char** argv){
 	
 	InitialConditions(&par, &parHost, &d_point);
 	CudaSafeCall( cudaMemcpyToSymbol(d_par, &par, sizeof(ParD)) );
+	
+	curandState *devStates;
+	cudaMalloc((void **)&devStates, par.CN*par.N2*sizeof(curandState));
+	d_SeedNoise<<<parHost.blocks, parHost.threads>>>(devStates, parHost.seed, par.N2);
 	
 	for(size_t t=0; t<parHost.EndSteps+1; t++){
 		d_SumRho<<<parHost.blocks1D, parHost.threads1D>>>(d_point);
@@ -363,7 +382,9 @@ int main(int argc, char** argv){
 		d_FFT_TimeStep(d_point, BatchFFT_TimeStep,false);
 		CudaCheckError();
 		
-		d_UpdateRD <<<parHost.blocks, parHost.threads>>>(d_point);
+		bool disN = false;
+		
+		d_UpdateRD <<<parHost.blocks, parHost.threads>>>(d_point, devStates, disN);
 		CudaCheckError();
 		
 		if(t%parHost.SaveSteps==0){//Save computed data
@@ -386,9 +407,12 @@ int main(int argc, char** argv){
 	
 	CudaDeviceMemFree(&d_point);
 	
-	cufftDestroy(BatchFFT_DerivFor);
-	cufftDestroy(BatchFFT_DerivBack);
-	cufftDestroy(BatchFFT_TimeStep);
+	cudaFree(devStates);
+	
+	//figure out why this causes an error
+	//~ cufftDestroy(BatchFFT_DerivFor);
+	//~ cufftDestroy(BatchFFT_DerivBack);
+	//~ cufftDestroy(BatchFFT_TimeStep);
 }
 
 /* \fn ChooseGPU()
@@ -420,25 +444,30 @@ void ChooseGPU(){
 	}
 }
 
+/* \fn Assert(ParD*, ParHost*)
+ * \brief Assert that some parameters are in a sane range
+ * \param par: Struct in which we store all values. This struct will be copied to the constant device Memory later
+ * \param ParHost: Parameters we only need on the host
+ */
 void Assert(ParD* par, ParHost* parHost){
 	assert(par->N > 0);
 	assert(par->L > 0);
 	assert(par->NumSave > 0);
 	assert(parHost->SaveSteps > 0);
 	assert(parHost->EndSteps > 0);
-	assert(parHost->EndSteps > parHost->SaveSteps);
+	assert(parHost->EndSteps >= parHost->SaveSteps);
 }
 
-/* \fn ComputeDistanceDimension(ParamW* , size_t, ---)
+/* \fn ComputeDistanceDimension(int, ---)
  * \brief Computes the Distance between two Points for all Dimension with respect to periodic Boundary conditions
- * \param paramW: Struct in which we store all values. This struct will be copied to the constant device Memory later
- * \param x1: Index of the Point
+ * \param size: size of the domain
+ * \param x1: x-coordinate of the first point
  */
 float ComputeDistance(int size, int x1, int x2, int y1, int y2){
 	return sqrt(pow(ComputeDistanceDimension(x1,x2, 2, size),2) + pow(ComputeDistanceDimension(y1,y2, 2, size),2));
 }
 
-/* \fn ComputeDistanceDimension(size_t, size_t, size_t, size_t)
+/* \fn ComputeDistanceDimension(int, int, int, int)
  * \brief Computes the Distance for two Points in one Dimension with respect to periodic Boundary conditions
  * \param Point1: Index of the First Point
  * \param Point2: Index of the second Point
@@ -464,7 +493,13 @@ int ComputeDistanceDimension(int Point1, int Point2, int Boundary, int size){
 	return Dist;
 }
 
-void CudaDeviceMem(ParD* par, ParHost* parHost, dPointer * d_point ){
+/* \fn CudaDeviceMem(ParD*, ParHost*, dPointer*)
+ * \brief Allocate all device memory
+ * \param par: Struct in which we store all values. This struct will be copied to the constant device Memory later
+ * \param ParHost: Parameters we only need on the host
+ * \param d_point: Struct with device pointers 
+ */
+void CudaDeviceMem(ParD* par, ParHost* parHost, dPointer* d_point ){
 	CudaSafeCall(cudaMalloc(&(d_point->Pos)					, par->CN * par->NumSave * sizeof(float2)) );
 	CudaSafeCall(cudaMalloc(&(d_point->ComPos)				, par->N2 * sizeof(float2)) );
 	CudaSafeCall(cudaMalloc(&(d_point->Sum)					, par->N2 * sizeof(float4)) );
@@ -477,18 +512,41 @@ void CudaDeviceMem(ParD* par, ParHost* parHost, dPointer * d_point ){
 	CudaSafeCall(cudaMalloc(&(d_point->RDOut)				, par->CN * par->N2 * sizeof(float2)) );
 	CudaSafeCall(cudaMalloc(&(d_point->RhoTot)				, par->CN * sizeof(float)) );
 	
+	CudaSafeCall(cudaMalloc(&(d_point->Noise)				, par->CN  * par->N2* sizeof(float)) );
 	CudaSafeCall(cudaMalloc(&(d_point->test)				, par->CN  * par->N2* sizeof(float)) );
+	
+	CudaSafeCall(cudaMemset(d_point->Noise, 0, par->CN  * par->N2* sizeof(float)));
 	
 	CudaSafeCall(cudaMalloc(&(d_point->FftIn)				, parHost->NumberCellFields * par->N2 * 2* sizeof(float2)));
 	CudaSafeCall(cudaMalloc(&(d_point->FftOut)				, parHost->NumberCellFields * par->N2 * 4* sizeof(float2)));
 }
 
+/* \fn CudaDeviceMemFree(dPointer*)
+ * \brief Free all device memory
+ * \param d_point: Struct with device pointers  */
 void CudaDeviceMemFree(dPointer * d_point ){
+	CudaSafeCall(cudaFree(d_point->Pos) );
+	CudaSafeCall(cudaFree(d_point->ComPos) );
+	CudaSafeCall(cudaFree(d_point->Sum) );
 	CudaSafeCall(cudaFree(d_point->SpecMethDiffBend) );
+	CudaSafeCall(cudaFree(d_point->SpectralGradLap) );
 	CudaSafeCall(cudaFree(d_point->CellsIn) );
 	CudaSafeCall(cudaFree(d_point->CellsOut) );
+	CudaSafeCall(cudaFree(d_point->phiOld) );
+	CudaSafeCall(cudaFree(d_point->RDIn) );
+	CudaSafeCall(cudaFree(d_point->RDOut) );
+	CudaSafeCall(cudaFree(d_point->RhoTot) );
+	CudaSafeCall(cudaFree(d_point->Noise) );
+	CudaSafeCall(cudaFree(d_point->FftIn) );
+	CudaSafeCall(cudaFree(d_point->FftOut) );
 }
 
+/* \fn InitialConditions(ParD*, ParHost*, dPointer*)
+ * \brief Fill Cell and RD fields with the initial conditions. Determine start positions and directions
+ * \param par: Struct in which we store all values. This struct will be copied to the constant device Memory later
+ * \param ParHost: Parameters we only need on the host
+ * \param d_point: Struct with device Pointers 
+ */
 void InitialConditions(ParD* par, ParHost* parHost, dPointer * d_point){
 	float2 *Cells	= new float2[parHost->NumberCellFields * par->N2]();
 	float2 *RDIn	= new float2[par->CN * par->N2]();
@@ -514,8 +572,7 @@ void InitialConditions(ParD* par, ParHost* parHost, dPointer * d_point){
 				
 				if(arcDist <0) arcDist += 2*M_PI;
 				if(1.0 * M_PI/2.0 > arcDist || arcDist > 3.0 * M_PI/2.0 ){
-					//~ RDIn[offset + par->N2*CellIdx].x = (1.8 + rn())* Phi0;
-					RDIn[offset + par->N2*CellIdx].x = (2.5)* Phi0;
+					RDIn[offset + par->N2*CellIdx].x = (1.8 + rn())* Phi0;
 				} 
 			}
 		}
@@ -550,11 +607,17 @@ void InitialConditions(ParD* par, ParHost* parHost, dPointer * d_point){
 	delete[] RDIn;
 	delete[] Pos;
 	delete[] Direction;
-	
-	
-	
 }
 
+
+/* \fn InitializeStartDirection(ParD*, ParHost*, dPointer*, float*, float2*)
+ * \brief Determine start positions and directions. Either read it from file or place them semi-random on the grid
+ * \param par: Struct in which we store all values. This struct will be copied to the constant device Memory later
+ * \param ParHost: Parameters we only need on the host
+ * \param d_point: Struct with device Pointers 
+ * \param AngleVec: Initial cell direction
+ * \param Position: Initial cell position
+ */
 void InitializeStartDirection(ParD* par, ParHost* parHost, dPointer * d_point, float* AngleVec, float2* Position){
 	//Calculate the maximal number of starting positions 
 	//distance between the middle of two Cells should be two times the radius + some extra space. We also need to know how many Cells can fit in one line.
@@ -588,8 +651,6 @@ void InitializeStartDirection(ParD* par, ParHost* parHost, dPointer * d_point, f
 		Position[CellIdx].x = fmod(PossibleStartPositions[StartList[CellIdx]].x + parHost->R/par->dx * rn() + par->N,par->N);
 		Position[CellIdx].y = fmod(PossibleStartPositions[StartList[CellIdx]].y + parHost->R/par->dx * rn() + par->N,par->N);
 	}
-	
-	CudaSafeCall( cudaMemcpyAsync(d_point->Pos,	Position, par->CN * sizeof(float2), cudaMemcpyHostToDevice) );
 	
 	//random start Directions
 	for(int CellIdx = 0; CellIdx < par->CN; CellIdx++){
@@ -630,39 +691,44 @@ void PlotStates(ParD* par, ParHost* parHost, dPointer *d_point, int run){
 	sprintf(RunChar, "%5.5d", run);
 	std::string PfName = "PhaseField";
 	std::string PName = "Polarisation";
+	std::string IName = "Inh";
 	std::string fileP= parHost->path+"/"+PName+"_"+RunChar+".dat";
 	std::string filePF	= parHost->path+"/"+PfName+"_"+RunChar+".dat";
-	std::ofstream outP, outPF;
+	std::string fileI	= parHost->path+"/"+IName+"_"+RunChar+".dat";
+	std::ofstream outP, outPF, outI;
 	outP.open (fileP.c_str(),std::ios::out );
 	outPF.open (filePF.c_str(),std::ios::out );
+	outI.open (fileI.c_str(),std::ios::out );
 
-	if (outP.is_open() && outPF.is_open()){
+	if (outP.is_open() && outPF.is_open() && outI.is_open()){
 		for(int y=0; y< par->N; y++){
 			for(int x=0; x< par->N; x++){
 				int offset = x + y * par->N;
 				outPF	<< Sum[offset].x << " ";
 				outP 	<< Sum[offset].z << " ";
+				outI 	<< Sum[offset].w << " ";
 			}
 			outPF <<std::endl;
 			outP <<std::endl;
+			outI <<std::endl;
 		}
 	}
 	outPF.close();
 	outP.close();
+	outI.close();
 	
 	delete[] Sum;
 	
 	//~ std::string cmd0 = "python plotCombinedData.py "+parHost->path+" &";
 	std::string cmd0 = "python plotCombinedData.py "+parHost->path;
 	system(cmd0.c_str());
-	//~ sleep(2);
 }
 
 void PlotRandomField(ParD* par, ParHost* parHost, dPointer *d_point, int run){
 	if(not parHost->PlotStates) return;
 	
-	float *F  = new float[par->N2];
-	CudaSafeCall( cudaMemcpy(F , d_point->test, par->N2 *sizeof(float), cudaMemcpyDeviceToHost) );
+	float *F  = new float[par->N2*par->CN];
+	CudaSafeCall( cudaMemcpy(F , d_point->test, par->N2*par->CN *sizeof(float), cudaMemcpyDeviceToHost) );
 	
 	char RunChar[10];
 	sprintf(RunChar, "%5.5d", run);
@@ -705,7 +771,7 @@ void Prepare(ParD* par, ParHost* parHost){
 	parHost->SaveSteps = parHost->SaveTime/par->dt;
 	parHost->EndSteps = parHost->EndTime/par->dt;
 	
-	par->NumSave = parHost->EndSteps/parHost->SaveSteps; //how often we save
+	par->NumSave = parHost->EndSteps/parHost->SaveSteps+1; //how often we save
 }
 
 void PrepareGPU(ParD* par, ParHost* parHost){
@@ -719,8 +785,6 @@ void PrepareGPU(ParD* par, ParHost* parHost){
 	parHost->blocks.y = (par->N + block-1)/block;
 	parHost->threads.x = block;
 	parHost->threads.y = block;
-	
-	//~ par->TotalWarp = parHost->blocks.x * parHost->blocks.y * 8;
 	
 	//For BatchFFT
 	parHost->blocks1D = dim3(par->CN, 1);
@@ -763,16 +827,12 @@ void ReadParamFromFile(ParD* par, ParHost* parHost){
 void Scaling(ParD* par, ParHost* parHost){
 	//phi
 	par->alpha = par->alpha * par->dt/parHost->tao;
-	std::cout << "par->alpha" << par->alpha << std::endl;
 	par->beta  = par->beta * par->dt/parHost->tao;
-	std::cout << "par->beta" << par->beta << std::endl;
 	//~ par->grep  = par->grep * par->dt/(parHost->tao * parHost->epsilon);
 	//~ par->sigma = par->sigma * par->dt * parHost->epsilon * parHost->epsilon/(parHost->tao * 12.0 * par->dx2);
 	par->gamma = parHost->gamma * par->dt /(parHost->epsilon * parHost->epsilon)/parHost->tao;
 	par->kappa = parHost->kappa * par->dt /(parHost->epsilon * parHost->epsilon)/parHost->tao;
 	
-	
-	std::cout << "par->gamma" << par->gamma << std::endl;
 	//rho
 	par->k_b = par->k_b * par->dt;
 	par->k_c = par->k_c * par->dt;
@@ -825,7 +885,6 @@ void SetUpSpecM(dPointer *d_point, ParD* par, ParHost* parHost){
 			k2 = qx[x] * qx[x] + qy[y] * qy[y];
 			k4 = (qx[x] * qx[x] + qy[y] * qy[y]) * (qx[x] * qx[x] + qy[y] * qy[y]);
 			
-			//~ OperatorPF = -par->dt * (parHost->gamma/parHost->tao * k2 + k4 * parHost->kappa/parHost->tao);
 			OperatorPF = -par->dt * (parHost->gamma/parHost->tao * k2 + k4 * parHost->kappa/parHost->tao);
 			
 			SpectralDiffBend_h[offset] = exp(OperatorPF) /par->N2;
