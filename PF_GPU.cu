@@ -1,3 +1,5 @@
+// Copyright Dirk Kulawiak. Check https://gitlab.com/dirkkul/Phasefield-GPU for details and more documentation.
+
 #include "PF_GPU.hu"
 
 __device__ __constant__ ParD d_par; //Parameterstruct on GPU
@@ -14,7 +16,10 @@ __global__ void d_SeedNoise(curandState *state, int seed, int n){
 	}
 }
 
-
+/* \fn d_PreparePhiGDeriv(dPointer*)
+ * \brief Timestep and second (from diffusion) and fourth (from bending) derivatives of phi in Fourier space. 
+ * \param d_point: Struct with all pointers to device memory
+ */
 __global__ void d_DiffusionFFT(dPointer d_point){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
@@ -28,6 +33,10 @@ __global__ void d_DiffusionFFT(dPointer d_point){
 	}
 };
 
+/* \fn d_PreparePhiGDeriv(dPointer*)
+ * \brief Prepare the computation of the explicit derivatives in d_PhiGDeriv(..) and write the components we need to FftIn. Then we fourier transform this in a seperate step.
+ * \param d_point: Struct with all pointers to device memory
+ */
 __global__ void d_PreparePhiGDeriv(dPointer d_point){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
@@ -51,7 +60,12 @@ __global__ void d_PreparePhiGDeriv(dPointer d_point){
 	}
 }
 
-
+/* \fn d_PhiGDeriv(dPointer*)
+ * \brief We need to explicitly compute the first derivatives of phi (X and Y direction), the laplace of phi and G(phi). 
+ * 			Here, we multiply the values of phi (first field of d_point.FftIn) and G(phi) (second) in Fourier space with the respective coefficient. 
+ * 			Afterwards, we do the inverse fourier transform in a seperate step. 
+ * \param d_point: Struct with all pointers to device memory
+ */
 __global__ void d_PhiGDeriv(dPointer d_point){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
@@ -60,6 +74,7 @@ __global__ void d_PhiGDeriv(dPointer d_point){
 		float4 const coeff = d_point.SpectralGradLap[offset];
 		
 		for(int Cell = 0; Cell < d_par.CN;  Cell+= 2){
+			//laplcace phi (1. field) and laplce G (2. field)
 			d_point.FftOut[offset + 4 * Cell/2 * d_par.N2] 		= d_point.FftIn[offset + Cell 		* d_par.N2] * coeff.x;
 			d_point.FftOut[offset + (4 * Cell/2 + 1) * d_par.N2]	= d_point.FftIn[offset + (Cell + 1) * d_par.N2] * coeff.x;
 			
@@ -70,12 +85,17 @@ __global__ void d_PhiGDeriv(dPointer d_point){
 			OutGradX.x = -InVar.y * coeff.z;
 			OutGradY.x = -InVar.y * coeff.w;
 			
+			//First derivative of phi in x (3. field) and y (4. field) direction
 			d_point.FftOut[offset + (4 * Cell/2 + 2) * d_par.N2] = OutGradX;
 			d_point.FftOut[offset + (4 * Cell/2 + 3) * d_par.N2] = OutGradY;
 		}
 	}
 }
 
+/* \fn d_PhiExpl(dPointer*)
+ * \brief Compute the explicit part of the time step of phi.
+ * \param d_point: Struct with all pointers to device memory
+ */
 __global__ void d_PhiExpl(dPointer d_point){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
@@ -94,6 +114,7 @@ __global__ void d_PhiExpl(dPointer d_point){
 		DivY = d_point.FftOut[offset+3*d_par.N2].y;
 		float absgrad2 = sqrt(DivX*DivX + DivY*DivY);
 		
+		//Sum of phi and |\nabla phi| for cell-cell interaction.
 		for(int CellIdx = 0; CellIdx < d_par.CN; CellIdx++){
 			if(CellIdx%2 == 0){
 					Phi = d_point.CellsIn[offset + d_par.N2 * CellIdx].x;
@@ -109,6 +130,7 @@ __global__ void d_PhiExpl(dPointer d_point){
 			AbsGradSum += DivX*DivX + DivY*DivY;
 		}
 		
+		//explicit part for each cell.
 		for(int CellIdx = 0; CellIdx < d_par.CN; CellIdx++){
 			float const Rho = d_point.RDIn[offset+CellIdx*d_par.N2].x;
 			if(CellIdx%2 == 0){
@@ -149,7 +171,12 @@ __global__ void d_PhiExpl(dPointer d_point){
 	}
 }
 
-__global__ void d_UpdateRD(dPointer d_point, curandState *state, bool disN){
+/* \fn d_UpdateRD(dPointer*, curandState*)
+ * \brief Do the time step for the polarity marker rho and the inhibitor I.
+ * \param d_point: Struct with all pointers to device memory
+ * \param state: Current state of the RNG
+ */
+__global__ void d_UpdateRD(dPointer d_point, curandState *state){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
 	
@@ -194,10 +221,6 @@ __global__ void d_UpdateRD(dPointer d_point, curandState *state, bool disN){
 			float noise = d_par.eta * (curand_uniform(&localState)-0.5);
 			state[offset + CellInd] = localState;
 			
-			if( disN)
-				noise = 0;
-			
-			
 			if(Phi >= 0.0001){
 				RDdiv.x = ReakDiff.x/Phi;
 				RDdiv.y = ReakDiff.y/Phi + noise;
@@ -210,6 +233,11 @@ __global__ void d_UpdateRD(dPointer d_point, curandState *state, bool disN){
 	}
 }
 
+/* \fn d_Position(dPointer*, int)
+ * \brief Calculate the COM of the phase field. We use it as the current position of the cell.
+ * \param d_point: Struct with all pointers to device memory
+ * \param run: Current run number, to save the position in the correct place
+ */
 __global__ void d_Position(dPointer d_point, int run){
 	int offset0		= threadIdx.x;
 	int cacheidx	= threadIdx.x;
@@ -264,6 +292,10 @@ __global__ void d_Position(dPointer d_point, int run){
 	}
 };
 
+/* \fn d_SumCont(dPointer*)
+ * \brief Sum up all cell fields (phi, rho I) at each position. This is only done, when we need to plot the states.
+ * \param d_point: Struct with all pointers to device memory
+ */
 __global__ void d_SumCont(dPointer d_point){
 	unsigned int const x=threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int const y=threadIdx.y + blockIdx.y * blockDim.y;
@@ -289,6 +321,10 @@ __global__ void d_SumCont(dPointer d_point){
 	
 };
 
+/* \fn d_SumRho(dPointer*)
+ * \brief Compute RhoTot int phi* rho/int phi. This is done to compute the non-bound amount of rho which is needed to compute the reaction term of rho.
+ * \param d_point: Struct with all pointers to device memory
+ */
 __global__ void d_SumRho(dPointer d_point){
 	int offset0		= threadIdx.x;
 	int cacheidx	= threadIdx.x;
@@ -346,7 +382,7 @@ int main(int argc, char** argv){
 		exit(1);
 	}
 	
-	//ParameterStruct
+	//Parameter structs
 	ParD par;
 	ParHost parHost;
 	dPointer d_point;
@@ -355,7 +391,6 @@ int main(int argc, char** argv){
 	ReadParamFromFile(&par, &parHost);
 	Prepare(&par, &parHost);
 	Scaling(&par, &parHost);
-	
 	
 	cufftHandle BatchFFT_TimeStep, BatchFFT_DerivFor, BatchFFT_DerivBack;
 	int n[2]={par.N,par.N};
@@ -404,9 +439,7 @@ int main(int argc, char** argv){
 		d_FFT_TimeStep(d_point, BatchFFT_TimeStep,false);
 		CudaCheckError();
 		
-		bool disN = false;
-		
-		d_UpdateRD <<<parHost.blocks, parHost.threads>>>(d_point, devStates, disN);
+		d_UpdateRD <<<parHost.blocks, parHost.threads>>>(d_point, devStates);
 		CudaCheckError();
 		
 		if(t%parHost.SaveSteps==0){//Save computed data
@@ -415,11 +448,12 @@ int main(int argc, char** argv){
 			d_Position<<<parHost.blocks1D, parHost.threads1D>>>(d_point, run);
 			CudaCheckError();
 			
-			d_SumCont <<<parHost.blocks, parHost.threads>>>(d_point);
-			CudaCheckError();
-			
-			PlotStates(&par, &parHost, &d_point, run);
-			PlotRandomField(&par, &parHost, &d_point, run);
+			if(parHost.PlotStates){
+				d_SumCont <<<parHost.blocks, parHost.threads>>>(d_point);
+				CudaCheckError();
+				PlotStates(&par, &parHost, &d_point, run);
+				//~ PlotRandomField(&par, &parHost, &d_point, run); //This is for debugging purposes
+			}
 		}
 		
 		swap(d_point.RDIn, d_point.RDOut);
@@ -758,8 +792,6 @@ void InitializeStartDirection(ParD* par, ParHost* parHost, dPointer * d_point, f
 }
 
 void PlotStates(ParD* par, ParHost* parHost, dPointer *d_point, int run){
-	if(not parHost->PlotStates) return;
-	
 	float4 *Sum  = new float4[par->N2];
 	CudaSafeCall( cudaMemcpy(Sum , d_point->Sum , par->N2 * sizeof(float4), cudaMemcpyDeviceToHost) );
 	
@@ -923,7 +955,6 @@ void Scaling(ParD* par, ParHost* parHost){
 	par->k_Ib = par->k_Ib * par->dt;
 	par->eta = par->eta * sqrt(par->dt)/par->dx;
 	par->DiffRD.y = par->DiffRD.y * par->dt/(2 * par->dx2);
-
 }
 
 void SetUpPosM(dPointer *d_point, ParD* par, ParHost* parHost){
