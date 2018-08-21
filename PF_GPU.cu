@@ -568,10 +568,7 @@ void CudaDeviceMem(ParD* par, ParHost* parHost, dPointer* d_point ){
 	CudaSafeCall(cudaMalloc(&(d_point->RDOut)				, par->CN * par->N2 * sizeof(float2)) );
 	CudaSafeCall(cudaMalloc(&(d_point->RhoTot)				, par->CN * sizeof(float)) );
 	
-	CudaSafeCall(cudaMalloc(&(d_point->Noise)				, par->CN  * par->N2* sizeof(float)) );
 	CudaSafeCall(cudaMalloc(&(d_point->test)				, par->CN  * par->N2* sizeof(float)) );
-	
-	CudaSafeCall(cudaMemset(d_point->Noise, 0, par->CN  * par->N2* sizeof(float)));
 	
 	CudaSafeCall(cudaMalloc(&(d_point->FftIn)				, parHost->NumberCellFields * par->N2 * 2* sizeof(float2)));
 	CudaSafeCall(cudaMalloc(&(d_point->FftOut)				, parHost->NumberCellFields * par->N2 * 4* sizeof(float2)));
@@ -592,7 +589,6 @@ void CudaDeviceMemFree(dPointer * d_point ){
 	CudaSafeCall(cudaFree(d_point->RDIn) );
 	CudaSafeCall(cudaFree(d_point->RDOut) );
 	CudaSafeCall(cudaFree(d_point->RhoTot) );
-	CudaSafeCall(cudaFree(d_point->Noise) );
 	CudaSafeCall(cudaFree(d_point->FftIn) );
 	CudaSafeCall(cudaFree(d_point->FftOut) );
 }
