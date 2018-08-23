@@ -78,7 +78,7 @@ __global__ void d_PhiGDeriv(dPointer d_point){
 			d_point.FftOut[offset + 4 * Cell/2 * d_par.N2] 		= d_point.FftIn[offset + Cell 		* d_par.N2] * coeff.x;
 			d_point.FftOut[offset + (4 * Cell/2 + 1) * d_par.N2]	= d_point.FftIn[offset + (Cell + 1) * d_par.N2] * coeff.x;
 			
-			float2 InVar = d_point.FftIn[offset + Cell	* d_par.N2];
+			float2 const InVar = d_point.FftIn[offset + Cell	* d_par.N2];
 			float2 OutGradX, OutGradY;
 			OutGradX.y	= InVar.x * coeff.z;
 			OutGradY.y	= InVar.x * coeff.w;
@@ -131,6 +131,7 @@ __global__ void d_PhiExpl(dPointer d_point){
 		}
 		
 		//explicit part for each cell.
+		float const micropat = d_point.MicroPat[offset];
 		for(int CellIdx = 0; CellIdx < d_par.CN; CellIdx++){
 			float const Rho = d_point.RDIn[offset+CellIdx*d_par.N2].x;
 			if(CellIdx%2 == 0){
@@ -158,7 +159,7 @@ __global__ void d_PhiExpl(dPointer d_point){
 			float const PhiUpdate = Phi
 			+ d_par.kappa * (PotGrad + GDiff.y*(laplace-GDiff.x/d_par.epsilon2))
 			- d_par.gamma * GDiff.x
-			+ (d_par.alpha*Rho - d_par.beta) * sqrt(gradAbs)
+			+ (d_par.alpha*Rho*micropat - d_par.beta) * sqrt(gradAbs)
 			- d_par.grep * (PhiSum - Phi)*Phi
 			+ d_par.sigma * (AbsGradSum - gradAbs)*gradAbs;
 			
@@ -405,6 +406,7 @@ int main(int argc, char** argv){
 	SetUpSpecM(&d_point, &par, &parHost);
 	
 	InitialConditions(&par, &parHost, &d_point);
+	InitialiseMicropattern(&par, &parHost, &d_point);
 	CudaSafeCall( cudaMemcpyToSymbol(d_par, &par, sizeof(ParD)) );
 	
 	curandState *devStates;
@@ -568,6 +570,8 @@ void CudaDeviceMem(ParD* par, ParHost* parHost, dPointer* d_point ){
 	CudaSafeCall(cudaMalloc(&(d_point->RDOut)				, par->CN * par->N2 * sizeof(float2)) );
 	CudaSafeCall(cudaMalloc(&(d_point->RhoTot)				, par->CN * sizeof(float)) );
 	
+	CudaSafeCall(cudaMalloc(&(d_point->MicroPat)			, par->N2 * sizeof(float)) );
+	
 	CudaSafeCall(cudaMalloc(&(d_point->test)				, par->CN  * par->N2* sizeof(float)) );
 	
 	CudaSafeCall(cudaMalloc(&(d_point->FftIn)				, parHost->NumberCellFields * par->N2 * 2* sizeof(float2)));
@@ -589,9 +593,62 @@ void CudaDeviceMemFree(dPointer * d_point ){
 	CudaSafeCall(cudaFree(d_point->RDIn) );
 	CudaSafeCall(cudaFree(d_point->RDOut) );
 	CudaSafeCall(cudaFree(d_point->RhoTot) );
+	CudaSafeCall(cudaFree(d_point->MicroPat) );
 	CudaSafeCall(cudaFree(d_point->FftIn) );
 	CudaSafeCall(cudaFree(d_point->FftOut) );
 }
+
+
+/* \fn CudaDeviceMemFree(dPointer*)
+ * \brief Free all device memory
+ * \param d_point: Struct with device pointers  */
+void InitialiseMicropattern(ParD* par, ParHost* parHost, dPointer * d_point){
+	float *Micropattern = new float[par->N2];
+	if(parHost->PatternMethod == 0){ //1 everywhere
+		for(int y = 0; y < par->N; y++){
+			for(int x = 0; x < par->N; x++){
+				int index = y * par->N + x;
+				Micropattern[index] = 1.0;
+			}
+		}
+	}else if(parHost->PatternMethod == 1){ //circle
+		for(int y = 0; y < par->N; y++){
+			for(int x = 0; x < par->N; x++){
+				int index = y * par->N + x;
+				float xpos = (x - par->N/2) * par->dx;
+				float ypos = (y - par->N/2) * par->dx;
+				Micropattern[index] = 1.0f/2.0f*(1+tanh((parHost->patternWidth/2.-sqrt(xpos*xpos+ypos*ypos))/parHost->epsilon));
+			}
+		}
+	}else if(parHost->PatternMethod == 2){ //stripe
+		for(int y = 0; y < par->N; y++){
+			for(int x = 0; x < par->N; x++){
+				int index = y * par->N + x;
+				float xpos = (x - par->N/2) * par->dx;
+				Micropattern[index] = 1.0f/2.0f*(1+tanh((parHost->patternWidth/2.0f-sqrt(xpos*xpos))/parHost->epsilon));
+			}
+		}
+	}else{
+		std::cout << "No valid Micropattern mode. exiting ";
+		exit(1);
+	}
+	
+	std::string MicroPatternFile = parHost->path+"/Micropattern.dat";
+	std::ofstream outsp;
+	outsp.open (MicroPatternFile.c_str(),std::ios::out );
+	if(outsp.is_open()){
+		for(int y = 0; y < par->N; y++){
+			for(int x = 0; x < par->N; x++){
+				outsp << Micropattern[y * par->N + x]<< "\t";
+			}
+			outsp << std::endl;
+		}
+		outsp.close();
+	}
+	delete[] Micropattern;
+	CudaSafeCall( cudaMemcpy(d_point->MicroPat , Micropattern, par->N2 * sizeof(float), cudaMemcpyHostToDevice) );
+}
+
 
 /* \fn InitialConditions(ParD*, ParHost*, dPointer*)
  * \brief Fill Cell and RD fields with the initial conditions. Determine start positions and directions
@@ -926,6 +983,9 @@ void ReadParamFromFile(ParD* par, ParHost* parHost){
 	parHost->R = pt.get<float>("main.Radius");
 	parHost->EndTime = pt.get<float>("main.EndTime");
 	parHost->SaveTime = pt.get<float>("main.SaveTime");
+	
+	parHost->patternWidth = pt.get<float>("main.patternWidth");
+	parHost->PatternMethod = pt.get<int>("main.PatternMethod");
 	
 	parHost->PlotStates = pt.get<bool>("main.PlotStates");
 	parHost->StartAngleFromFile = pt.get<bool>("main.StartAngleFromFile");

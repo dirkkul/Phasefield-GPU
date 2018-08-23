@@ -24,7 +24,7 @@
 
 //Device Pointer
 struct dPointer {
-	float  *phiOld, *test, *Noise;
+	float  *phiOld, *test, *MicroPat;
 	float2 *FftIn, *FftOut;
 	float2 *CellsIn, *CellsOut;
 	float2 *RDIn, *RDOut;
@@ -53,9 +53,9 @@ struct ParHost {
 	int  EndSteps, SaveSteps;
 	float SaveTime, EndTime;
 	int NumberCellFields; //sizes of the fields we use
-	size_t method;
+	int PatternMethod;
 	long seed;
-	float R;
+	float R, patternWidth;
 	float gamma, kappa, epsilon, tao;
 	dim3 blocks, threads, blocks1D, threads1D;
 	std::string path;
@@ -86,6 +86,7 @@ float ComputeDistance(int size, int x1, int x2, int y1, int y2);
 int ComputeDistanceDimension(int Point1, int Point2, int Boundary, int size);
 void CudaDeviceMem(ParD* par, ParHost* parHost, dPointer * d_point);
 void CudaDeviceMemFree(dPointer * d_point);
+void InitialiseMicropattern(ParD* par, ParHost* parHost, dPointer * d_point);
 void InitialConditions(ParD* par, ParHost* parHost, dPointer * d_point);
 void InitializeStartDirection(ParD* par, ParHost* parHost, dPointer * d_point, float* AngleVec, float2* Position);
 void PlotRandomField(ParD* par, ParHost* parHost, dPointer *d_point, int run);
