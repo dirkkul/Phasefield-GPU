@@ -25,3 +25,23 @@ You can provide start positions and directions with the files `AngleStartData.da
 -   proper makefile
 -   Unittests
 
+# Technical Documentation
+
+We use a semi-implicit agorhitm to solve the equations for the pahse field $` \phi(x)`$.
+It is saved in a float2 field, where each cell with an even (uneven) index is saved in the .x (.y) part of the array. 
+While this choice complicates some code (depending on the cell index you have to write from different fields) and wastes computational power for uneven number of cells, it simplifies the use of our semi-implicit algorhitms.
+This way, we can easily carry out a fourier transformation, apply the respective coefficients and then do the inverse transformation to all cells at once.
+
+
+# Timestepping
+The following steps are repeated at each time step:
+
+-   calculate the amount of non-bound rho. Here, we need the sum of $` \phi`$ and $` phi*\rho`$. The result is later used to do the time-stepping for $` \rho`$
+-   compute the derivatives we need to calculate the explicit part of the time-step for $` \phi`$, this include $`\nabla\phi, \nabla G(\phi), \partial_x \phi, \partial_y \phi`$
+-   compute the explicit part needed to update $`\phi`$
+-   do the (implicit) time-step $`\phi`$
+-   update $`\rho`$ and $`I`$ explicitly with an Euler-Maruyama method
+-   plot the fields/calculate the position (not at every timestep)
+-   switch the in and out fields of $`\rho`$ and $`I`$
+
+Note, that the in and out fields of $`\phi`$ do not need to be switched.
