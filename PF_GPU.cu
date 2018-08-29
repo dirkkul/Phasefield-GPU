@@ -240,48 +240,47 @@ __global__ void d_UpdateRD(dPointer d_point, curandState *state){
  * \param run: Current run number, to save the position in the correct place
  */
 __global__ void d_Position(dPointer d_point, int run){
-	int offset0		= threadIdx.x;
+	int offset		= threadIdx.x;
 	int cacheidx	= threadIdx.x;
 	int CellIdx		= blockIdx.x;
 	__shared__ float Ax1cache[MAXT], Ax2cache[MAXT], Ay1cache[MAXT], Ay2cache[MAXT];
 	
-	int x, y, offset;
-	float PF, Ax1, Ax2, Ay1, Ay2;
+	int x, y;
+	float PF, Ax1 = 0, Ax2 = 0, Ay1 = 0, Ay2 = 0;
 	
 	if(CellIdx < d_par.CN){
-		while(offset0 < d_par.N){
-			offset = offset0;
-			while(offset < d_par.N2){
-				x= offset%d_par.N;
-				y= offset/d_par.N;
-				
+		while(offset < d_par.N2){
+			x = offset % d_par.N;
+			y = offset / d_par.N;
+			
 			if(CellIdx %2 == 0)
 				PF = d_point.CellsIn[offset + CellIdx/2 * d_par.N2].x;
 			else
 				PF = d_point.CellsIn[offset + (CellIdx-1)/2 * d_par.N2].y;
-				
-				Ax1 += d_point.ComPos[x].x * PF;
-				Ax2 += d_point.ComPos[x].y * PF;
-				Ay1 += d_point.ComPos[y].x * PF;
-				Ay2 += d_point.ComPos[y].y * PF;
-				offset += d_par.N;
-			}
-			offset0 += blockDim.x;
+			
+			float2 const coeffX = d_point.ComPos[x];
+			float2 const coeffY = d_point.ComPos[y];
+			Ax1 += coeffX.x * PF;
+			Ax2 += coeffX.y * PF;
+			Ay1 += coeffY.x * PF;
+			Ay2 += coeffY.y * PF;
+			
+			offset += MAXT;
 		}
 		
-		Ax1cache[cacheidx]	= Ax1;
-		Ax2cache[cacheidx]	= Ax2;
-		Ay1cache[cacheidx]	= Ay1;
-		Ay2cache[cacheidx]	= Ay2;
+		Ax1cache[cacheidx] = Ax1;
+		Ax2cache[cacheidx] = Ax2;
+		Ay1cache[cacheidx] = Ay1;
+		Ay2cache[cacheidx] = Ay2;
 		
 		__syncthreads();
 		
 		for(unsigned int s = blockDim.x/2; s>0; s>>=1){
 			if(cacheidx < s){
-				Ax1cache[cacheidx] 	+= Ax1cache[cacheidx + s];
-				Ax2cache[cacheidx] 	+= Ax2cache[cacheidx + s];
-				Ay1cache[cacheidx] 	+= Ay1cache[cacheidx + s];
-				Ay2cache[cacheidx] 	+= Ay2cache[cacheidx + s];
+				Ax1cache[cacheidx] += Ax1cache[cacheidx + s];
+				Ax2cache[cacheidx] += Ax2cache[cacheidx + s];
+				Ay1cache[cacheidx] += Ay1cache[cacheidx + s];
+				Ay2cache[cacheidx] += Ay2cache[cacheidx + s];
 			}
 			__syncthreads();
 		}
@@ -559,7 +558,7 @@ int ComputeDistanceDimension(int Point1, int Point2, int Boundary, int size){
  */
 void CudaDeviceMem(ParD* par, ParHost* parHost, dPointer* d_point ){
 	CudaSafeCall(cudaMalloc(&(d_point->Pos)					, par->CN * par->NumSave * sizeof(float2)) );
-	CudaSafeCall(cudaMalloc(&(d_point->ComPos)				, par->N2 * sizeof(float2)) );
+	CudaSafeCall(cudaMalloc(&(d_point->ComPos)				, par->N * sizeof(float2)) );
 	CudaSafeCall(cudaMalloc(&(d_point->Sum)					, par->N2 * sizeof(float4)) );
 	CudaSafeCall(cudaMalloc(&(d_point->SpecMethDiffBend)	, par->N2 * sizeof(float)) );
 	CudaSafeCall(cudaMalloc(&(d_point->SpectralGradLap)		, par->N2 * sizeof(float4)) );
@@ -730,7 +729,8 @@ void InitialConditions(ParD* par, ParHost* parHost, dPointer * d_point){
 void InitializeStartDirection(ParD* par, ParHost* parHost, dPointer * d_point, float* Direction, float2* Position){
 	
 	if(parHost->StartPosFromFile){ //read start positions from file
-		std::ifstream StartDirfile ("CellPosStartData.dat");
+		std::string StartPosFile = parHost->path+"/CellPosStartData.dat";
+		std::ifstream StartDirfile (StartPosFile.c_str());
 		if(StartDirfile.is_open()){
 			float PosX, PosY;
 			size_t Cell=0;
@@ -795,7 +795,8 @@ void InitializeStartDirection(ParD* par, ParHost* parHost, dPointer * d_point, f
 	if(parHost->StartAngleFromFile){
 		std::cout << "Read custom starting Angle Values from file AngleStartData.dat" <<std::endl;
 		
-		std::ifstream Valfile ("AngleStartData.dat");
+		std::string StartDirFile = parHost->path+"/AngleStartData.dat";
+		std::ifstream Valfile (StartDirFile.c_str());
 		if(Valfile.is_open()){
 			double Val;
 			int Cell=0;
@@ -954,7 +955,7 @@ void PrepareGPU(ParD* par, ParHost* parHost){
 
 void ReadParamFromFile(ParD* par, ParHost* parHost){
 	boost::property_tree::ptree pt;
-	boost::property_tree::ini_parser::read_ini("Simulation/param.ini", pt);
+	boost::property_tree::ini_parser::read_ini(parHost->path+"/param.ini", pt);
 	par->CN = pt.get<int>("main.CellNumber");
 	par->N = pt.get<int>("main.N");
 	par->L = pt.get<float>("main.L");
@@ -1014,18 +1015,17 @@ void Scaling(ParD* par, ParHost* parHost){
 }
 
 void SetUpPosM(dPointer *d_point, ParD* par, ParHost* parHost){
-	float2 *ComPos	= new float2[par->N2];
+	float2 *ComPos	= new float2[par->N];
 	par->DeltaX = 2.0*M_PI/((float)par->N);
 	
 	for(size_t y=0; y<par->N; y++){
 		for(size_t x=0; x<par->N; x++){
-			size_t offset = x + par->N * y;
-			ComPos[offset].x = cos(y*par->DeltaX)/par->DeltaX;
-			ComPos[offset].y = sin(y*par->DeltaX)/par->DeltaX;
+			ComPos[x].x = cos(x*par->DeltaX)/par->DeltaX;
+			ComPos[x].y = sin(x*par->DeltaX)/par->DeltaX;
 		}
 	}
 	
-	CudaSafeCall( cudaMemcpy(d_point->ComPos, ComPos, par->N2*sizeof(float2), cudaMemcpyHostToDevice) );
+	CudaSafeCall( cudaMemcpy(d_point->ComPos, ComPos, par->N*sizeof(float2), cudaMemcpyHostToDevice) );
 	delete[] ComPos;
 }
 
@@ -1093,15 +1093,14 @@ void WritePosition(ParD* par, ParHost* parHost, dPointer * d_point){
 	float2 *Pos	= new float2[par->CN * par->NumSave];
 	CudaSafeCall( cudaMemcpy(Pos , d_point->Pos , par->CN * par->NumSave * sizeof(float2), cudaMemcpyDeviceToHost) );
 	
-	std::string Myfile=parHost->path+"/Pos.dat";  			//add path to file
+	std::string Myfile=parHost->path+"/Pos.dat"; //add path to file
 	std::ofstream outPos;
-	//output for velocity and position
 	outPos.open (Myfile.c_str(), std::ios::app);
 	
 	for(int t=0; t < par->NumSave; t++){
 		outPos << parHost->SaveTime * t ;
 		for(int CellIdx=0; CellIdx < par->CN; CellIdx++){
-			outPos << "\t"<< Pos[CellIdx].x *par->dx << "\t" << Pos[CellIdx].y * par->dx;
+			outPos << "\t"<< Pos[CellIdx*par->NumSave + t].x *par->dx << "\t" << Pos[CellIdx*par->NumSave + t].y * par->dx;
 		}
 		outPos << std::endl;
 	}
